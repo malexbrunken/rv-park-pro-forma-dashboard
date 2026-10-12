@@ -67,8 +67,31 @@ export interface ModelResult {
 
 const sumArr = (a: number[]) => a.reduce((s, v) => s + v, 0);
 
+const roundTo = (v: number, step: number) => Math.round(v / step) * step;
+
 export function runModel(inp: Inputs): ModelResult {
   const mult = inp.projectCostMultiplier;
+
+  // ---- Project hard costs (needed by property tax, interest reserve, contingency) ----
+  const constructionSubtotal = sumArr(CONSTRUCTION_BUDGET.map((c) => sumArr(c.byYear))) * mult;
+  const maxCabins = Math.max(...SITE_COUNTS.cabin);
+  const cabins = inp.cabinCostPerUnit * maxCabins * mult;
+  const rvInfra = inp.rvSiteInfrastructure * mult;
+  const hardCost = constructionSubtotal + cabins + rvInfra;
+  const contingency = inp.contingencyPct * hardCost;
+
+  // ---- Borrower opex by year (carried-forward blank years inflate from prior year) ----
+  const borrowerAnnual = BORROWER_OPEX.map((l) => {
+    const out: number[] = [];
+    for (let yi = 0; yi < 4; yi++) {
+      if (yi === 0) out.push(sumArr(l.monthly2027));
+      else if (l.carried?.includes(yi)) out.push(out[yi - 1] * (1 + inp.expenseInflation));
+      else out.push(l.annual[yi]);
+    }
+    out.push(out[3] * (1 + inp.expenseInflation));
+    return out.map((v) => v * inp.borrowerOpexMultiplier);
+  });
+
   // ---- Operating years ----
   const ops = YEARS.map((year, yi) => {
     const units = {} as Record<SiteType, number>;
@@ -80,57 +103,57 @@ export function runModel(inp: Inputs): ModelResult {
     for (const { key } of SITE_TYPES) {
       units[key] = SITE_COUNTS[key][yi];
       avail[key] = units[key] * inp.seasonNights;
-      occN[key] = avail[key] * inp.occupancy[key];
+      occN[key] = avail[key] * Math.min(1, inp.occupancy[key][yi] * inp.occupancyMultiplier);
       rate[key] = inp.rates[key] * Math.pow(1 + inp.annualRateIncrease, yi);
       lodgingBySite[key] = occN[key] * rate[key];
       revenueAt100 += avail[key] * rate[key];
     }
+    const occupiedNights = sumArr(Object.values(occN));
     const lodging = sumArr(Object.values(lodgingBySite));
-    const store = inp.storeSales, other = inp.otherIncome;
+    const store = Math.round(occupiedNights * inp.storeSalesPerNight);
+    const other = Math.round(occupiedNights * inp.otherIncomePerNight);
     const revenue = lodging + store + other;
     const cogs = store * inp.storeCogsPct;
-    const infl = yi === 4 ? 1 + inp.expenseInflation2031 : 1;
-    const opexLines: YearResult["opexLines"] = BORROWER_OPEX.map((l) => {
-      const base = yi === 0 ? sumArr(l.monthly2027) : l.annual[Math.min(yi, 3)];
-      return { name: l.name, amount: base * infl * inp.borrowerOpexMultiplier, placeholder: false };
-    });
+    const opexLines: YearResult["opexLines"] = BORROWER_OPEX.map((l, li) => ({
+      name: l.name, amount: borrowerAnnual[li][yi], placeholder: !!l.carried?.length,
+    }));
     const totalUnits = sumArr(Object.values(units));
     const ph: [string, number][] = [
-      ["Insurance (property, liability, workers comp)", inp.insurance],
-      ["Property / personal property tax", inp.propertyTax],
-      ["Repairs & maintenance", inp.repairsMaintenance],
-      ["Water, trash, propane & other utilities", inp.utilitiesOther],
-      ["Cabin & bathhouse housekeeping / supplies", inp.housekeeping],
+      ["Insurance (property, liability, workers comp)", inp.insurance[yi]],
+      ["Property / personal property tax", roundTo(hardCost * inp.assessedPctOfHardCost * inp.propertyTaxRate * inp.taxPhaseIn[yi], 100)],
+      ["Repairs & maintenance", Math.round(revenue * inp.rmPctOfRevenue[yi])],
+      ["Water, trash, propane & other utilities", totalUnits * inp.utilitiesPerUnit[yi]],
+      ["Cabin & bathhouse housekeeping / supplies", occN.cabin * inp.housekeepingPerCabinNight + inp.bathhouseSupplies[yi]],
       ["Card & booking fees", revenue * inp.cardFeesPct],
       ["Management fee", revenue * inp.mgmtFeePct],
       ["Replacement reserve", totalUnits * inp.replacementReservePerSite],
     ];
     ph.forEach(([name, amount]) => opexLines.push({ name, amount, placeholder: true }));
-    const borrowerOpex = sumArr(opexLines.filter((l) => !l.placeholder).map((l) => l.amount));
-    const placeholderOpex = sumArr(opexLines.filter((l) => l.placeholder).map((l) => l.amount));
+    const borrowerOpex = sumArr(borrowerAnnual.map((b) => b[yi]));
+    const placeholderOpex = sumArr(ph.map(([, v]) => v));
     const opex = borrowerOpex + placeholderOpex;
     const noi = revenue - cogs - opex;
     const totalAvail = sumArr(Object.values(avail));
-    const weightedOcc = totalAvail ? sumArr(Object.values(occN)) / totalAvail : 0;
+    const weightedOcc = totalAvail ? occupiedNights / totalAvail : 0;
     const variablePct = inp.cardFeesPct + inp.mgmtFeePct;
     const fixedOpex = opex - revenue * variablePct;
     return { year, units, availableNights: avail, occupiedNights: occN, rate, lodgingBySite, lodging, store, other, revenue, cogs, grossProfit: revenue - cogs, opexLines, borrowerOpex, placeholderOpex, opex, noi, weightedOcc, variablePct, fixedOpex, revenueAt100 };
   });
 
-  // ---- Sources & Uses ----
-  const constructionSubtotal = sumArr(CONSTRUCTION_BUDGET.map((c) => sumArr(c.byYear))) * mult;
-  const maxCabins = Math.max(...SITE_COUNTS.cabin);
-  const cabins = inp.cabinCostPerUnit * maxCabins * mult;
-  const rvInfra = inp.rvSiteInfrastructure * mult;
-  const contingency = inp.contingencyPct * (constructionSubtotal + cabins + rvInfra);
-  const usesExWc = constructionSubtotal + cabins + rvInfra + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + inp.interestReserve + inp.closingCosts + inp.landAcquisition;
-  const loanExWc = usesExWc * (1 - inp.equityPct);
+  // ---- Sources & Uses (excluding working capital) ----
+  const loanPct = 1 - inp.equityPct;
+  const interestReserve = inp.interestReserveOverride ?? roundTo(hardCost * loanPct * 0.5 * inp.interestRate * 9 / 12, 1000);
+  const closingBase = 0.75 * (hardCost + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + interestReserve) * loanPct;
+  const closingCosts = inp.closingCostsOverride ??
+    roundTo(Math.min(closingBase, 1_000_000) * 0.035 + Math.max(closingBase - 1_000_000, 0) * 0.0375 + inp.closingThirdParty, 100);
+  const usesExWc = hardCost + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + interestReserve + closingCosts + inp.landAcquisition;
+  const loanExWc = usesExWc * loanPct;
 
   // ---- 2027 monthly seasonality (debt service on loan excl. working-capital line) ----
   const y0 = ops[0];
   const monthlyDs = (inp.interestOnlyYears >= 1 ? loanExWc * inp.interestRate : pmt(inp.interestRate / 12, inp.amortYears * 12, loanExWc) * 12) / 12;
   const gridTotal = sumArr(Object.values(RATE_GRID_2027.classAMonthlyRevenue));
-  const phFixed2027 = sumArr(y0.opexLines.filter((l) => l.placeholder && !["Card & booking fees", "Management fee"].includes(l.name)).map((l) => l.amount)) / 12;
+  const phFixed2027 = sumArr(y0.opexLines.slice(BORROWER_OPEX.length).filter((l) => !["Card & booking fees", "Management fee"].includes(l.name)).map((l) => l.amount)) / 12;
   let cum = 0;
   const monthly = MONTHS.map((m, mi) => {
     const share = (RATE_GRID_2027.classAMonthlyRevenue[m] ?? 0) / gridTotal;
@@ -145,7 +168,9 @@ export function runModel(inp: Inputs): ModelResult {
   });
   const lowest = Math.min(...monthly.map((m) => m.cumulative));
   const peakShortfall = Math.min(0, lowest);
-  const workingCapital = inp.workingCapitalOverride ?? -peakShortfall;
+  const carryMonths = monthly.slice(0, Math.max(0, Math.min(12, inp.workingCapitalExtraMonths)));
+  const offSeasonCarry = sumArr(carryMonths.map((m) => m.borrowerOpex + m.placeholderOpex + m.debtService));
+  const workingCapital = inp.workingCapitalOverride ?? -peakShortfall + offSeasonCarry;
 
   const uses = [
     ...CONSTRUCTION_BUDGET.map((c) => ({ name: c.name, amount: sumArr(c.byYear) * mult, placeholder: false })),
@@ -156,9 +181,9 @@ export function runModel(inp: Inputs): ModelResult {
     { name: "Hard-cost contingency", amount: contingency, placeholder: true },
     { name: "Pre-opening costs (2026 accounting, legal, marketing)", amount: PRE_OPENING_COSTS, placeholder: false },
     { name: "Working capital / off-season reserve", amount: workingCapital, placeholder: true },
-    { name: "Interest reserve during construction", amount: inp.interestReserve, placeholder: true },
-    { name: "Loan closing costs / guarantee fees", amount: inp.closingCosts, placeholder: true },
-    { name: "Land acquisition (leased)", amount: inp.landAcquisition, placeholder: true },
+    { name: "Interest reserve during construction", amount: interestReserve, placeholder: true },
+    { name: "Loan closing costs / guarantee fees", amount: closingCosts, placeholder: true },
+    { name: "Land acquisition (leased)", amount: inp.landAcquisition, placeholder: false },
   ];
   const totalUses = usesExWc + workingCapital;
   const equity = Math.round(totalUses * inp.equityPct);
@@ -196,12 +221,17 @@ export function runModel(inp: Inputs): ModelResult {
     })),
   };
 
+  // Mirrors the workbook's "inputs still at $0 / 0%" counter.
+  const sumY = (f: (y: (typeof ops)[number], i: number) => number) => sumArr(ops.map(f));
+  const occSum = (k: SiteType, from = 0) => sumArr(inp.occupancy[k].slice(from));
   const zeroChecks = [
-    inp.seasonNights, inp.rates.tent, inp.rates.cabin, inp.annualRateIncrease, inp.storeSales, inp.storeCogsPct, inp.otherIncome,
-    inp.insurance, inp.propertyTax, inp.repairsMaintenance, inp.utilitiesOther, inp.housekeeping, inp.cardFeesPct, inp.mgmtFeePct,
-    inp.replacementReservePerSite, inp.expenseInflation2031, inp.cabinCostPerUnit, inp.rvSiteInfrastructure, inp.softCosts, inp.ffe,
-    inp.contingencyPct, workingCapital, inp.interestReserve, inp.closingCosts, inp.equityPct, inp.interestRate, inp.amortYears,
-    inp.interestOnlyYears, inp.minDscr,
+    inp.seasonNights, occSum("classA", 1), occSum("classBC"), occSum("tent"), occSum("cabin"), inp.rates.tent, inp.rates.cabin,
+    inp.annualRateIncrease, sumY((y) => y.store), inp.storeCogsPct, sumY((y) => y.other),
+    sumArr(inp.insurance), sumY((y) => y.opexLines[BORROWER_OPEX.length + 1].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 2].amount),
+    sumY((y) => y.opexLines[BORROWER_OPEX.length + 3].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 4].amount),
+    inp.cardFeesPct, inp.mgmtFeePct, inp.replacementReservePerSite, inp.expenseInflation, inp.cabinCostPerUnit, inp.rvSiteInfrastructure,
+    inp.softCosts, inp.ffe, inp.contingencyPct, workingCapital, interestReserve, closingCosts, inp.equityPct, inp.interestRate,
+    inp.amortYears, inp.interestOnlyYears, inp.minDscr,
   ];
   const placeholderCount = zeroChecks.filter((v) => v === 0).length;
   const stabilizedRv = SITE_COUNTS.classA[3] + SITE_COUNTS.classBC[3];
