@@ -1,4 +1,4 @@
-// Extracted from the 'Estimate Sources' tab of rv_park_pro_forma_estimated.xlsx (48 estimated inputs).
+// Extracted from the 'Estimate Sources' tab of rv_park_pro_forma_estimated.xlsx (50 estimated inputs).
 // Personal names / the reference-bid tab are intentionally excluded.
 
 export interface EstimateSource { key: string; input: string; location: string; basis: string; urls: string[]; sourceType: string; confidence: string }
@@ -57,15 +57,33 @@ export const ESTIMATE_SOURCES: EstimateSource[] = [
     "confidence": "Medium-Low"
   },
   {
-    "key": "occupancy.cabin",
-    "input": "Cabin occupancy 2027-31",
-    "location": "Assumptions C21:G21",
-    "basis": "No cabins in 2027. ARVC 2023: park-model cabins avg 52%, modern cabins 50%. Ramp 35→52%.",
+    "key": "cabinOccRamp",
+    "input": "Cabin occupancy ramp by operating year (feeds Assumptions row 21)",
+    "location": "Cabin Schedule C13:F13",
+    "basis": "ARVC 2023: park-model cabins avg 52%, modern cabins 50% in operating months. Ramp 35/42/48/52% by year of operation; cabins only operate the season after they are cash-built.",
     "urls": [
       "https://ohi.org/wp-content/uploads/2023/10/2023_Benchmarking-Report.pdf"
     ],
     "sourceType": "Fetched",
     "confidence": "Low-Medium"
+  },
+  {
+    "key": "cabinMinReserve",
+    "input": "Minimum cash reserve before buying a cabin",
+    "location": "Cabin Schedule C7",
+    "basis": "Suggested starting point (~1-2 months of off-season fixed costs). Owner/lender may want more.",
+    "urls": [],
+    "sourceType": "Rule-of-thumb",
+    "confidence": "Low"
+  },
+  {
+    "key": "cabinBuildYearShare",
+    "input": "Share of build-year season a new cabin operates",
+    "location": "Cabin Schedule C10",
+    "basis": "0 = a cabin bought with year-t cash opens the following season (conservative; avoids counting revenue before delivery/set-up).",
+    "urls": [],
+    "sourceType": "Rule-of-thumb",
+    "confidence": "Medium"
   },
   {
     "key": "rates.tent",
@@ -137,7 +155,7 @@ export const ESTIMATE_SOURCES: EstimateSource[] = [
     "key": "insurance",
     "input": "Insurance (property, GL, workers comp)",
     "location": "Assumptions C38:G38",
-    "basis": "CompleteMarkets: small campground $3.5-9k, mid-size park ($0.5-2M revenue) $9-25k core package; analytics.loan example 3.6% of revenue. Rising with cabins/pool/payroll. GET A QUOTE.",
+    "basis": "CompleteMarkets: small campground $3.5-9k, mid-size park ($0.5-2M revenue) $9-25k core package; analytics.loan example 3.6% of revenue. Formula: base $15k→$21.2k + $500 per operating cabin. GET A QUOTE.",
     "urls": [
       "https://completemarkets.com/contentpage/Campground-and-RV-Park-Insurance-Guide/",
       "https://www.analytics.loan/sba-feasibility-study-rv-park"
@@ -149,7 +167,7 @@ export const ESTIMATE_SOURCES: EstimateSource[] = [
     "key": "propertyTax",
     "input": "Property / personal property tax",
     "location": "Assumptions C39:G39",
-    "basis": "Formula: 1.75% (NE 2025 avg commercial/industrial rate 1.7481%) × assumed assessed value 60% of hard cost (his budget + cabins + site work) × phase-in 35/75/90/100/100%. County levies vary a lot – ask the county assessor.",
+    "basis": "Formula: 1.75% (NE 2025 avg commercial/industrial rate 1.7481%) × assumed assessed value 60% of financed hard cost (his budget + site work) × phase-in 35/75/90/100/100%, plus cash-built cabins from the following Jan 1. County levies vary a lot – ask the county assessor.",
     "urls": [
       "https://revenue.nebraska.gov/sites/default/files/doc/pad/research/annual-reports/2025/annrpt2025%20table%2019.pdf"
     ],
@@ -233,7 +251,7 @@ export const ESTIMATE_SOURCES: EstimateSource[] = [
     "key": "cabinCostPerUnit",
     "input": "Cabin cost per unit (all-in)",
     "location": "Assumptions C49",
-    "basis": "Green River park-model cabins $58.9-88.9k unit; $65-75k fully installed in the Southeast; extra delivery to the Midwest. 20 cabins × $80k = $1.6M.",
+    "basis": "Green River park-model cabins $58.9-88.9k unit; $65-75k fully installed in the Southeast; extra delivery to the Midwest. OWNER UPDATE: cabins are cash-funded one at a time from 2029 (Cabin Schedule), not financed.",
     "urls": [
       "https://greenriverlogcabins.com/how-to-add-cabins-to-rv-park/"
     ],
@@ -280,7 +298,7 @@ export const ESTIMATE_SOURCES: EstimateSource[] = [
     "key": "contingencyPct",
     "input": "Construction contingency %",
     "location": "Assumptions C53",
-    "basis": "MMCG and UnionMetric: 10-15% contingency; no contractor bids yet, so mid-range 12.5%.",
+    "basis": "MMCG and UnionMetric: 10-15% contingency; no contractor bids yet, so mid-range 12.5%. Applied to financed construction only (cabins excluded).",
     "urls": [
       "https://www.mmcginvest.com/post/practical-guide-for-rv-park-planning-development-operations",
       "https://unionmetricfeasibility.com/insights/rv-park-occupancy-regional-analysis-feasibility-guide"

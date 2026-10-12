@@ -5,7 +5,7 @@ import {
   Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, Pie, PieChart, ReferenceLine,
   ResponsiveContainer, Cell, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { Inputs, PLACEHOLDER_KEYS, REVIEW_NOTES, SCENARIO_DEFAULTS, Scenario, SITE_TYPES, SiteType, Y5, YEARS } from "@/lib/data";
+import { Inputs, RvSiteType, PLACEHOLDER_KEYS, REVIEW_NOTES, SCENARIO_DEFAULTS, Scenario, SITE_TYPES, SiteType, Y5, YEARS } from "@/lib/data";
 import { ESTIMATE_BY_KEY, ESTIMATE_NOTES, ESTIMATE_SOURCES, ESTIMATE_URLS } from "@/lib/estimates";
 import { runModel } from "@/lib/model";
 
@@ -54,9 +54,9 @@ function Card({ title, children, className = "" }: { title?: string; children: R
   );
 }
 
-type Fmt = "pct" | "usd" | "num" | "x";
+type Fmt = "pct" | "usd" | "num" | "x" | "year";
 function fmt(v: number, f: Fmt) {
-  return f === "pct" ? pct(v) : f === "usd" ? usd(v) : f === "x" ? x(v) : v.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  return f === "year" ? String(v) : f === "pct" ? pct(v) : f === "usd" ? usd(v) : f === "x" ? x(v) : v.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 function Slider({ label, value, onChange, min, max, step, format, tag }: {
@@ -103,6 +103,25 @@ function YearRow({ label, values, onChange, tag, format, step }: {
             <input type="number" min={0} step={step} aria-label={`${label} ${y}`}
               value={Number((values[i] * scale).toFixed(format === "pct" ? 2 : 0))}
               onChange={(e) => { const nv = [...values] as Y5; nv[i] = Math.max(0, Number(e.target.value) || 0) / scale; onChange(nv); }}
+              className="w-full rounded border border-slate-300 bg-white px-1 py-0.5 text-right font-mono text-[11px] text-slate-900" />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RampRow({ values, onChange }: { values: [number, number, number, number]; onChange: (v: [number, number, number, number]) => void }) {
+  const bg = useTagBg("cabinOccRamp");
+  return (
+    <div className={`rounded-md px-2 py-1.5 text-xs text-slate-700 ${bg}`}>
+      <div className="mb-1">Cabin occupancy by operating year (%)<Tag k="cabinOccRamp" /></div>
+      <div className="grid grid-cols-4 gap-1">
+        {["Yr 1", "Yr 2", "Yr 3", "Yr 4+"].map((lbl, i) => (
+          <label key={lbl} className="flex flex-col items-center">
+            <span className="text-[10px] text-slate-400">{lbl}</span>
+            <input type="number" min={0} max={100} step={1} aria-label={`Cabin occupancy ${lbl}`} value={Number((values[i] * 100).toFixed(2))}
+              onChange={(e) => { const nv = [...values] as [number, number, number, number]; nv[i] = Math.min(100, Math.max(0, Number(e.target.value) || 0)) / 100; onChange(nv); }}
               className="w-full rounded border border-slate-300 bg-white px-1 py-0.5 text-right font-mono text-[11px] text-slate-900" />
           </label>
         ))}
@@ -168,7 +187,7 @@ const PH_ROW_KEYS: Record<string, string> = {
   "Replacement reserve": "replacementReservePerSite",
 };
 const USE_KEYS: Record<string, string> = {
-  "Cabins (cost per unit × cabins planned)": "cabinCostPerUnit",
+  "Cabins financed at closing (owner: none; cash-funded, see cabin schedule)": "cabinCostPerUnit",
   "RV pads, roads, power pedestals, water/sewer laterals": "rvSiteInfrastructure",
   "Permits, impact fees & soft costs": "softCosts",
   "Furniture, fixtures & equipment": "ffe",
@@ -193,7 +212,7 @@ export default function Dashboard() {
   const autoCc = useMemo(() => runModel({ ...inp, closingCostsOverride: null }).uses.find((u) => u.name.startsWith("Loan closing"))!.amount, [inp]);
   const switchScenario = (s: Scenario) => { setScenario(s); setInp(SCENARIO_DEFAULTS[s]); };
   const set = <K extends keyof Inputs>(k: K) => (v: Inputs[K]) => setInp((p) => ({ ...p, [k]: v }));
-  const setOcc = (k: SiteType) => (v: Y5) => setInp((p) => ({ ...p, occupancy: { ...p.occupancy, [k]: v } }));
+  const setOcc = (k: RvSiteType) => (v: Y5) => setInp((p) => ({ ...p, occupancy: { ...p.occupancy, [k]: v } }));
   const setRate = (k: SiteType) => (v: number) => setInp((p) => ({ ...p, rates: { ...p.rates, [k]: v } }));
   const estimated = scenario === "estimated";
 
@@ -260,8 +279,8 @@ export default function Dashboard() {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Assumptions · {estimated ? "Estimated" : "Placeholder"}</h2>
           <Group title="Occupancy by year" open>
             <Slider label="Occupancy adjustment (all types & years)" value={inp.occupancyMultiplier} onChange={set("occupancyMultiplier")} min={0.5} max={1.5} step={0.01} format="x" />
-            {SITE_TYPES.map((s) => (
-              <YearRow key={s.key} label={s.label} values={inp.occupancy[s.key]} onChange={setOcc(s.key)} format="pct" step={1} tag={`occupancy.${s.key}`} />
+            {SITE_TYPES.filter((s) => s.key !== "cabin").map((s) => (
+              <YearRow key={s.key} label={s.label} values={inp.occupancy[s.key as RvSiteType]} onChange={setOcc(s.key as RvSiteType)} format="pct" step={1} tag={`occupancy.${s.key}`} />
             ))}
             <Slider label="Season length (nights open)" value={inp.seasonNights} onChange={set("seasonNights")} min={60} max={365} step={1} format="num" tag="seasonNights" />
           </Group>
@@ -270,6 +289,17 @@ export default function Dashboard() {
               <Slider key={s.key} label={s.label} value={inp.rates[s.key]} onChange={setRate(s.key)} min={0} max={250} step={0.5} format="usd" tag={`rates.${s.key}`} />
             ))}
             <Slider label="Annual rate increase" value={inp.annualRateIncrease} onChange={set("annualRateIncrease")} min={0} max={0.1} step={0.005} format="pct" tag="annualRateIncrease" />
+          </Group>
+          <Group title="Cabins (cash-funded build-out)" open>
+            <p className="px-2 text-[11px] text-slate-500">Cabins are not in the loan. Starting in the first build year, a cabin is bought only when start-of-year cash minus the minimum reserve covers its full cost.</p>
+            <NumField label="Cabin cost per unit (2027 $, all-in)" value={inp.cabinCostPerUnit} onChange={set("cabinCostPerUnit")} tag="cabinCostPerUnit" />
+            <Slider label="Cabin cost escalation / yr" value={inp.cabinCostEscalation} onChange={set("cabinCostEscalation")} min={0} max={0.08} step={0.005} format="pct" tag="expenseInflation" />
+            <Slider label="First build year" value={inp.cabinBuildStartYear} onChange={set("cabinBuildStartYear")} min={2028} max={2031} step={1} format="year" />
+            <NumField label="Minimum cash reserve before buying" value={inp.cabinMinReserve} onChange={set("cabinMinReserve")} tag="cabinMinReserve" step={5000} />
+            <Slider label="Cabins planned (max)" value={inp.cabinsPlanned} onChange={set("cabinsPlanned")} min={0} max={30} step={1} format="num" />
+            <Slider label="Cabins financed in the loan at closing" value={inp.cabinsFinanced} onChange={set("cabinsFinanced")} min={0} max={inp.cabinsPlanned} step={1} format="num" />
+            <Slider label="Share of build-year season operated" value={inp.cabinBuildYearShare} onChange={set("cabinBuildYearShare")} min={0} max={1} step={0.25} format="pct" tag="cabinBuildYearShare" />
+            <RampRow values={inp.cabinOccRamp} onChange={set("cabinOccRamp")} />
           </Group>
           <Group title="Financing" open>
             <Slider label="Interest rate" value={inp.interestRate} onChange={set("interestRate")} min={0.03} max={0.14} step={0.0025} format="pct" tag="interestRate" />
@@ -280,7 +310,6 @@ export default function Dashboard() {
           </Group>
           <Group title="Project cost">
             <Slider label="Project cost multiplier (hard costs)" value={inp.projectCostMultiplier} onChange={set("projectCostMultiplier")} min={0.5} max={3} step={0.05} format="x" />
-            <NumField label="Cabin cost per unit" value={inp.cabinCostPerUnit} onChange={set("cabinCostPerUnit")} tag="cabinCostPerUnit" />
             <NumField label="RV pads / roads / pedestals / laterals" value={inp.rvSiteInfrastructure} onChange={set("rvSiteInfrastructure")} tag="rvSiteInfrastructure" step={10000} />
             <NumField label="Permits & soft costs" value={inp.softCosts} onChange={set("softCosts")} tag="softCosts" />
             <NumField label="FF&E" value={inp.ffe} onChange={set("ffe")} tag="ffe" />
@@ -294,7 +323,8 @@ export default function Dashboard() {
           <Group title="Operating expenses">
             <Slider label="Borrower opex lines multiplier" value={inp.borrowerOpexMultiplier} onChange={set("borrowerOpexMultiplier")} min={0.5} max={2} step={0.05} format="x" />
             <Slider label="Expense inflation (2031 & carried-forward lines)" value={inp.expenseInflation} onChange={set("expenseInflation")} min={0} max={0.08} step={0.005} format="pct" tag="expenseInflation" />
-            <YearRow label="Insurance" values={inp.insurance} onChange={set("insurance")} format="usd" step={1000} tag="insurance" />
+            <YearRow label="Insurance (base)" values={inp.insurance} onChange={set("insurance")} format="usd" step={500} tag="insurance" />
+            <NumField label="Insurance per operating cabin" value={inp.insurancePerCabin} onChange={set("insurancePerCabin")} tag="insurance" step={100} />
             <Slider label="Property tax rate" value={inp.propertyTaxRate} onChange={set("propertyTaxRate")} min={0} max={0.04} step={0.0005} format="pct" tag="propertyTax" />
             <Slider label="Assessed value (% of hard cost)" value={inp.assessedPctOfHardCost} onChange={set("assessedPctOfHardCost")} min={0} max={1} step={0.05} format="pct" tag="propertyTax" />
             <YearRow label="Property tax phase-in" values={inp.taxPhaseIn} onChange={set("taxPhaseIn")} format="pct" step={5} tag="propertyTax" />
@@ -358,7 +388,7 @@ export default function Dashboard() {
                 </tr></thead>
                 <tbody className="text-right [&_td:first-child]:text-left [&_td:not(:first-child)]:font-mono">
                   {SITE_TYPES.map((s) => (
-                    <tr key={s.key} className="text-slate-600"><td className="py-1 pl-3">{s.label}<Tag k={`occupancy.${s.key}`} /></td>
+                    <tr key={s.key} className="text-slate-600"><td className="py-1 pl-3">{s.label}<Tag k={s.key === "cabin" ? "cabinOccRamp" : `occupancy.${s.key}`} /></td>
                       {r.years.map((y) => <td key={y.year}>{usd(y.lodgingBySite[s.key])}</td>)}</tr>
                   ))}
                   <tr className="text-slate-600"><td className="py-1 pl-3">General store sales<Tag k="storeSalesPerNight" /></td>{r.years.map((y) => <td key={y.year}>{usd(y.store)}</td>)}</tr>
@@ -450,6 +480,67 @@ export default function Dashboard() {
               <p className="mt-3 text-xs text-slate-500">Revenue spread by the monthly pattern of the borrower&apos;s 2027 Class A rate grid (Apr–Sep); expenses by month from his 2027 expense tab; annual costs not in his file spread evenly. Debt service here excludes the working-capital portion of the loan. The peak shortfall feeds the working-capital reserve in Sources &amp; Uses when set to auto.</p>
             </Card>
           </div>
+
+          <Card title="Cabin build schedule & cash balance (cash-funded, not financed)">
+            <div className={`mb-3 rounded-md px-3 py-2 text-sm ${r.cabinsBuiltTotal > 0 ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900"}`}>
+              <strong>{r.cabinsBuiltTotal} of {inp.cabinsPlanned - Math.min(inp.cabinsFinanced, inp.cabinsPlanned)} cash-funded cabins built by 2031.</strong> {r.cabinNote}
+            </div>
+            <div className="grid gap-6 xl:grid-cols-2">
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Cash balance (opening reserve + cash flow after debt service − cabin capex)</h3>
+                <ResponsiveContainer width="100%" height={260}>
+                  <ComposedChart data={r.cabins.map((c) => ({ year: String(c.year), "Ending cash": c.endingCash, "Cash flow after DS": c.cashFlow, "Cabin capex": -c.capex }))}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="year" /><YAxis tickFormatter={usdK} width={65} />
+                    <Tooltip formatter={(v) => usd(Number(v))} /><Legend />
+                    <ReferenceLine y={0} stroke="#94a3b8" />
+                    <ReferenceLine ifOverflow="extendDomain" y={inp.cabinMinReserve} stroke={C.amber} strokeDasharray="6 3" label={{ value: "Min reserve", position: "insideTopLeft", fill: C.amber, fontSize: 11 }} />
+                    <Bar isAnimationActive={false} dataKey="Cash flow after DS">{r.cabins.map((c) => <Cell key={c.year} fill={c.cashFlow < 0 ? C.red : C.teal} />)}</Bar>
+                    <Bar isAnimationActive={false} dataKey="Cabin capex" fill={C.sky} />
+                    <Line isAnimationActive={false} dataKey="Ending cash" stroke={C.navy} strokeWidth={3} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+              <div>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Cabins built & operating</h3>
+                <ResponsiveContainer width="100%" height={260}>
+                  <ComposedChart data={r.cabins.map((c) => ({ year: String(c.year), "Built this year": c.built, "Operating (effective)": c.effectiveUnits, "Cumulative built": c.cumulativeBuilt }))}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="year" /><YAxis allowDecimals={false} width={40} domain={[0, (max: number) => Math.max(4, max)]} />
+                    <Tooltip /><Legend />
+                    <Bar isAnimationActive={false} dataKey="Built this year" fill={C.sky} />
+                    <Bar isAnimationActive={false} dataKey="Operating (effective)" fill={C.teal} />
+                    <Line isAnimationActive={false} dataKey="Cumulative built" stroke={C.navy} strokeWidth={2} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead><tr className="border-b border-slate-300 text-right text-xs uppercase text-slate-500"><th className="py-2 text-left">Cabin schedule</th>{r.cabins.map((c) => <th key={c.year}>{c.year}</th>)}</tr></thead>
+                <tbody className="text-right [&_td:first-child]:text-left [&_td:not(:first-child)]:font-mono">
+                  {([
+                    ["Opening cash balance", (c) => usd(c.openingCash)],
+                    ["Cash flow after debt service", (c) => usd(c.cashFlow)],
+                    ["Cash available for cabins (opening − reserve)", (c) => usd(c.available)],
+                    ["Cost per cabin this year", (c) => usd(c.costPerCabin)],
+                    ["Cabins built this year", (c) => String(c.built)],
+                    ["Cumulative cabins built", (c) => String(c.cumulativeBuilt)],
+                    ["Cabin capex paid from cash", (c) => usd(-c.capex)],
+                    ["Ending cash balance", (c) => usd(c.endingCash)],
+                    ["Cabins operating (effective units)", (c) => c.effectiveUnits.toLocaleString("en-US", { maximumFractionDigits: 2 })],
+                    ["Cabin occupancy this year", (c) => pct(c.occupancy)],
+                  ] as [string, (c: (typeof r.cabins)[number]) => string][]).map(([label, f]) => (
+                    <tr key={label} className={label === "Ending cash balance" ? "border-t border-slate-200 font-semibold" : "text-slate-600"}>
+                      <td className="py-1">{label}</td>
+                      {r.cabins.map((c) => <td key={c.year} className={label === "Ending cash balance" && c.endingCash < 0 ? "text-red-700" : ""}>{f(c)}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">Opening 2027 cash = working-capital reserve funded at closing. Cabins built in a year open the following season (unless a build-year share is set) and add revenue, housekeeping, insurance (+ per cabin), utilities, reserves and property tax (from the following Jan 1).</p>
+          </Card>
 
           <div className="grid gap-6 xl:grid-cols-2">
             <Card title="Break-even occupancy vs. modeled">

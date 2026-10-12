@@ -6,6 +6,7 @@ export type YearIndex = 0 | 1 | 2 | 3 | 4;
 export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
 export type SiteType = "classA" | "classBC" | "tent" | "cabin";
+export type RvSiteType = Exclude<SiteType, "cabin">;
 export const SITE_TYPES: { key: SiteType; label: string }[] = [
   { key: "classA", label: "Class A motor-home sites" },
   { key: "classBC", label: "Class B/C RV sites" },
@@ -86,14 +87,15 @@ export type Y5 = [number, number, number, number, number];
 
 export interface Inputs {
   seasonNights: number;
-  occupancy: Record<SiteType, Y5>; // by year 2027–2031
+  occupancy: Record<RvSiteType, Y5>; // by year 2027–2031 (cabins: see cabin schedule)
   occupancyMultiplier: number; // scales every occupancy (1 = as entered)
   rates: Record<SiteType, number>; // 2027 base nightly rate
   annualRateIncrease: number;
   storeSalesPerNight: number; // $ per occupied site/unit-night
   storeCogsPct: number;
   otherIncomePerNight: number; // $ per occupied site/unit-night
-  insurance: Y5;
+  insurance: Y5; // base by year
+  insurancePerCabin: number; // + $ per operating cabin
   propertyTaxRate: number;
   assessedPctOfHardCost: number;
   taxPhaseIn: Y5;
@@ -106,7 +108,15 @@ export interface Inputs {
   replacementReservePerSite: number;
   expenseInflation: number; // 2031 vs 2030 and blank carried-forward lines
   borrowerOpexMultiplier: number;
-  cabinCostPerUnit: number;
+  cabinCostPerUnit: number; // all-in, 2027 $
+  /** Cabin build schedule: cabins are cash-funded from operations (not in the loan). */
+  cabinsPlanned: number;
+  cabinsFinanced: number; // cabins in the loan at closing (owner: 0)
+  cabinBuildStartYear: number;
+  cabinMinReserve: number; // cash kept before buying a cabin
+  cabinCostEscalation: number;
+  cabinBuildYearShare: number; // share of build-year season a new cabin operates
+  cabinOccRamp: [number, number, number, number]; // occupancy by cabin operating year 1,2,3,4+
   rvSiteInfrastructure: number;
   softCosts: number;
   ffe: number;
@@ -133,7 +143,7 @@ const occA = GRID_CLASS_A_OCC;
 
 export const PLACEHOLDER_INPUTS: Inputs = {
   seasonNights: 159,
-  occupancy: { classA: flat(occA), classBC: flat(occA), tent: flat(occA), cabin: flat(occA) },
+  occupancy: { classA: flat(occA), classBC: flat(occA), tent: flat(occA) },
   occupancyMultiplier: 1,
   rates: { classA: GRID_CLASS_A_ADR, classBC: GRID_CLASS_BC_ADR, tent: 0, cabin: 0 },
   annualRateIncrease: 0,
@@ -141,6 +151,7 @@ export const PLACEHOLDER_INPUTS: Inputs = {
   storeCogsPct: 0,
   otherIncomePerNight: 0,
   insurance: flat(0),
+  insurancePerCabin: 0,
   propertyTaxRate: 0,
   assessedPctOfHardCost: 0.6,
   taxPhaseIn: [0.35, 0.75, 0.9, 1, 1],
@@ -154,6 +165,13 @@ export const PLACEHOLDER_INPUTS: Inputs = {
   expenseInflation: 0,
   borrowerOpexMultiplier: 1,
   cabinCostPerUnit: 0,
+  cabinsPlanned: 20,
+  cabinsFinanced: 0,
+  cabinBuildStartYear: 2029,
+  cabinMinReserve: 50000,
+  cabinCostEscalation: 0,
+  cabinBuildYearShare: 0,
+  cabinOccRamp: [occA, occA, occA, occA],
   rvSiteInfrastructure: 0,
   softCosts: 0,
   ffe: 0,
@@ -179,14 +197,16 @@ export const ESTIMATED_INPUTS: Inputs = {
     classA: [occA, 0.55, 0.6, 0.63, 0.65],
     classBC: [0.35, 0.45, 0.55, 0.6, 0.62],
     tent: [0.15, 0.18, 0.22, 0.25, 0.25],
-    cabin: [0, 0.35, 0.42, 0.48, 0.52],
   },
+  cabinOccRamp: [0.35, 0.42, 0.48, 0.52],
+  cabinCostEscalation: 0.03,
   rates: { classA: GRID_CLASS_A_ADR, classBC: GRID_CLASS_BC_ADR, tent: 32, cabin: 150 },
   annualRateIncrease: 0.03,
   storeSalesPerNight: 4,
   storeCogsPct: 0.6,
   otherIncomePerNight: 2,
-  insurance: [15000, 20000, 24000, 25000, 26000],
+  insurance: [15000, 19500, 20000, 20600, 21200],
+  insurancePerCabin: 500,
   propertyTaxRate: 0.0175,
   rmPctOfRevenue: [0.025, 0.03, 0.035, 0.04, 0.045],
   utilitiesPerUnit: [200, 206, 212, 218, 225],
@@ -214,7 +234,7 @@ export const DEFAULT_INPUTS = PLACEHOLDER_INPUTS;
 
 /** Inputs that are placeholders in the owner-inputs-only workbook. */
 export const PLACEHOLDER_KEYS = new Set<string>([
-  "occupancy.classA", "occupancy.classBC", "occupancy.tent", "occupancy.cabin", "rates.tent", "rates.cabin", "annualRateIncrease",
+  "occupancy.classA", "occupancy.classBC", "occupancy.tent", "cabinOccRamp", "rates.tent", "rates.cabin", "annualRateIncrease",
   "storeSalesPerNight", "storeCogsPct", "otherIncomePerNight", "insurance", "propertyTax", "rmPct", "utilitiesPerUnit",
   "housekeeping", "cardFeesPct", "mgmtFeePct", "replacementReservePerSite", "expenseInflation",
   "cabinCostPerUnit", "rvSiteInfrastructure", "softCosts", "ffe", "contingencyPct", "workingCapital", "interestReserve",
@@ -226,6 +246,7 @@ export interface WorkbookOutputs {
   revenue: number[]; opex: number[]; noi: number[]; debtService: number[]; dscr: number[]; breakEvenOcc: number[];
   totalProjectCost: number; loan: number; equity: number; workingCapital: number;
   sens1: [number, number, number][]; sens2: [number, number, number][]; placeholderCount: number;
+  cabinEndingCash: number[]; cabinsBuilt: number;
 }
 export const WORKBOOK_OUTPUTS_PLACEHOLDER: WorkbookOutputs = {
   revenue: [324898, 649796, 649796, 649796, 649796],
@@ -241,22 +262,26 @@ export const WORKBOOK_OUTPUTS_PLACEHOLDER: WorkbookOutputs = {
   sens1: [[3, 2, 3.06661858386298], [0, 0, -0.653316991476226]],
   sens2: [[0, 0, 3.6735402640044], [5, 4, 1.20744595509183]],
   placeholderCount: 23,
+  cabinEndingCash: [-6964.78928182858, 211115.288242362, 419945.365766553, 578783.443290744, 737621.520814935],
+  cabinsBuilt: 0,
 };
 
 export const WORKBOOK_OUTPUTS_ESTIMATED: WorkbookOutputs = {
-  revenue: [274127, 626086.203218401, 855889.84892904, 959386.067181337, 1030880.82953539],
-  opex: [419499.89, 536922.534225288, 609285.759425033, 689709.618802694, 720365.979990477],
-  noi: [-153990.09, 71190.068993113, 224165.889504007, 245330.248378643, 285253.049544912],
-  debtService: [394748.0223, 435650.562904184, 435650.562904184, 435650.562904184, 435650.562904184],
-  dscr: [-0.390097179215178, 0.163410942289475, 0.51455434376039, 0.563135387093716, 0.654774890323393],
-  breakEvenOcc: [1.64470750327355, 0.747895257475277, 0.644778881860606, 0.672296148379857, 0.668262129818307],
-  totalProjectCost: 5194053.34,
-  loan: 4155242.34,
-  equity: 1038811,
-  workingCapital: 629053.34,
-  sens1: [[0, 0, -0.280831893103437], [0, 3, 0.121970672445204], [3, 2, 0.563135387093716], [3, 3, 0.754946132593069]],
-  sens2: [[0, 0, 0.665785306765007], [0, 4, 0.332892653382503], [5, 1, 0.410216570472448], [5, 4, 0.225619113759847]],
+  revenue: [274127, 536767.953218401, 635335.14292904, 700037.293261337, 741787.624302989],
+  opex: [413599.89, 496417.756725288, 524397.930005033, 592461.204628294, 614679.455624209],
+  noi: [-148090.09, 23712.196493113, 91704.8129240068, 86893.488633043, 105814.76867878],
+  debtService: [237109.8198, 261678.388821607, 261678.388821607, 261678.388821607, 261678.388821607],
+  dscr: [-0.624563293603414, 0.0906157997987303, 0.350448553802907, 0.33206215088813, 0.404369536037294],
+  breakEvenOcc: [1.30147325571593, 0.711633375902385, 0.708357847497239, 0.746895313230585, 0.742378296357057],
+  totalProjectCost: 3119865.84,
+  loan: 2495892.84,
+  equity: 623973,
+  workingCapital: 442365.84,
+  sens1: [[0, 0, -0.681765384496915], [0, 3, -0.197893151699507], [3, 2, 0.332062150888129], [3, 3, 0.562477499839276]],
+  sens2: [[0, 0, 0.392591441785438], [0, 4, 0.196295720892719], [5, 0, 0.266080168082155], [5, 4, 0.133040084041077]],
   placeholderCount: 0,
+  cabinEndingCash: [57165.9302, -180800.262128494, -350773.838026093, -525558.738214657, -681422.358357484],
+  cabinsBuilt: 0,
 };
 
 export const REVIEW_NOTES: { area: string; issue: string }[] = [

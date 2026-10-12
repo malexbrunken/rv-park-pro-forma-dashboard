@@ -25,7 +25,10 @@ function verify(scenario: Scenario, W: WorkbookOutputs) {
   chk("Working capital reserve", r.workingCapital, W.workingCapital, 0.01);
   W.sens1.forEach(([i, j, v]) => chk(`Sensitivity 1 [occ ${r.sens1.occChanges[i]}, rate ${r.sens1.rateChanges[j]}]`, r.sens1.grid[i][j], v, 1e-6));
   W.sens2.forEach(([i, j, v]) => chk(`Sensitivity 2 [rate ${r.sens2.rates[i].toFixed(3)}, overrun ${r.sens2.overruns[j]}]`, r.sens2.grid[i][j], v, 1e-6));
+  r.cabins.forEach((c, i) => chk(`Cabin schedule ending cash ${c.year}`, c.endingCash, W.cabinEndingCash[i], 0.01));
+  chk("Cabins built from cash by 2031", r.cabinsBuiltTotal, W.cabinsBuilt, 0);
   chk("Inputs still at $0 / 0%", r.placeholderCount, W.placeholderCount, 0);
+  console.log(`Cabins built ${r.cabinsBuiltTotal} (${r.cabinNote}) · Loan $${Math.round(r.loan).toLocaleString()}`);
   console.log(`Total project cost $${Math.round(r.totalUses).toLocaleString()} · NOI 2028 $${Math.round(r.years[1].noi).toLocaleString()} · DSCR ${r.years.map((y) => y.dscr.toFixed(2) + "x").join(" / ")}`);
 }
 verify("placeholder", WORKBOOK_OUTPUTS_PLACEHOLDER);

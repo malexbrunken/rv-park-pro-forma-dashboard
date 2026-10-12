@@ -1,6 +1,6 @@
 import {
   BORROWER_OPEX, CONSTRUCTION_BUDGET, Inputs, MONTHS, PRE_OPENING_COSTS, RATE_GRID_2027,
-  SITE_COUNTS, SITE_TYPES, SiteType, YEARS,
+  RvSiteType, SITE_COUNTS, SITE_TYPES, SiteType, YEARS,
 } from "./data";
 
 export function pmt(rate: number, n: number, pv: number): number {
@@ -63,6 +63,16 @@ export interface ModelResult {
   sens2: { rates: number[]; overruns: number[]; grid: number[][] };
   placeholderCount: number;
   costPerRvSite: number;
+  cabins: CabinYear[];
+  cabinsBuiltTotal: number;
+  cabinsUnbuilt: number;
+  cabinNote: string;
+}
+
+export interface CabinYear {
+  year: number; openingCash: number; cashFlow: number; available: number; costPerCabin: number;
+  built: number; cumulativeBuilt: number; capex: number; endingCash: number; cumulativeCapex: number;
+  operatingFull: number; effectiveUnits: number; yearsOperated: number; occupancy: number;
 }
 
 const sumArr = (a: number[]) => a.reduce((s, v) => s + v, 0);
@@ -72,13 +82,14 @@ const roundTo = (v: number, step: number) => Math.round(v / step) * step;
 export function runModel(inp: Inputs): ModelResult {
   const mult = inp.projectCostMultiplier;
 
-  // ---- Project hard costs (needed by property tax, interest reserve, contingency) ----
+  // ---- Financed project hard costs (cabins only if financed at closing) ----
   const constructionSubtotal = sumArr(CONSTRUCTION_BUDGET.map((c) => sumArr(c.byYear))) * mult;
-  const maxCabins = Math.max(...SITE_COUNTS.cabin);
-  const cabins = inp.cabinCostPerUnit * maxCabins * mult;
+  const cabinsFinanced = Math.min(inp.cabinsFinanced, inp.cabinsPlanned);
+  const cabinsInLoan = inp.cabinCostPerUnit * cabinsFinanced * mult;
   const rvInfra = inp.rvSiteInfrastructure * mult;
-  const hardCost = constructionSubtotal + cabins + rvInfra;
+  const hardCost = constructionSubtotal + cabinsInLoan + rvInfra;
   const contingency = inp.contingencyPct * hardCost;
+  const taxFactor = inp.assessedPctOfHardCost * inp.propertyTaxRate;
 
   // ---- Borrower opex by year (carried-forward blank years inflate from prior year) ----
   const borrowerAnnual = BORROWER_OPEX.map((l) => {
@@ -92,8 +103,9 @@ export function runModel(inp: Inputs): ModelResult {
     return out.map((v) => v * inp.borrowerOpexMultiplier);
   });
 
-  // ---- Operating years ----
-  const ops = YEARS.map((year, yi) => {
+  /** One operating year given the cabins operating that year. */
+  const opYear = (yi: number, cabinUnits: number, cabinOcc: number, priorCabinCapex: number) => {
+    const year = YEARS[yi];
     const units = {} as Record<SiteType, number>;
     const avail = {} as Record<SiteType, number>;
     const occN = {} as Record<SiteType, number>;
@@ -101,9 +113,10 @@ export function runModel(inp: Inputs): ModelResult {
     const lodgingBySite = {} as Record<SiteType, number>;
     let revenueAt100 = 0;
     for (const { key } of SITE_TYPES) {
-      units[key] = SITE_COUNTS[key][yi];
+      units[key] = key === "cabin" ? cabinUnits : SITE_COUNTS[key][yi];
       avail[key] = units[key] * inp.seasonNights;
-      occN[key] = avail[key] * Math.min(1, inp.occupancy[key][yi] * inp.occupancyMultiplier);
+      const occ = key === "cabin" ? cabinOcc : inp.occupancy[key][yi];
+      occN[key] = avail[key] * Math.min(1, occ * inp.occupancyMultiplier);
       rate[key] = inp.rates[key] * Math.pow(1 + inp.annualRateIncrease, yi);
       lodgingBySite[key] = occN[key] * rate[key];
       revenueAt100 += avail[key] * rate[key];
@@ -119,8 +132,8 @@ export function runModel(inp: Inputs): ModelResult {
     }));
     const totalUnits = sumArr(Object.values(units));
     const ph: [string, number][] = [
-      ["Insurance (property, liability, workers comp)", inp.insurance[yi]],
-      ["Property / personal property tax", roundTo(hardCost * inp.assessedPctOfHardCost * inp.propertyTaxRate * inp.taxPhaseIn[yi], 100)],
+      ["Insurance (property, liability, workers comp)", inp.insurance[yi] + inp.insurancePerCabin * cabinUnits],
+      ["Property / personal property tax", roundTo(hardCost * taxFactor * inp.taxPhaseIn[yi] + (yi > 0 ? priorCabinCapex * taxFactor : 0), 100)],
       ["Repairs & maintenance", Math.round(revenue * inp.rmPctOfRevenue[yi])],
       ["Water, trash, propane & other utilities", totalUnits * inp.utilitiesPerUnit[yi]],
       ["Cabin & bathhouse housekeeping / supplies", occN.cabin * inp.housekeepingPerCabinNight + inp.bathhouseSupplies[yi]],
@@ -129,7 +142,7 @@ export function runModel(inp: Inputs): ModelResult {
       ["Replacement reserve", totalUnits * inp.replacementReservePerSite],
     ];
     ph.forEach(([name, amount]) => opexLines.push({ name, amount, placeholder: true }));
-    const borrowerOpex = sumArr(borrowerAnnual.map((b) => b[yi]));
+    const borrowerOpex = sumArr(borrowerAnnual.map((bb) => bb[yi]));
     const placeholderOpex = sumArr(ph.map(([, v]) => v));
     const opex = borrowerOpex + placeholderOpex;
     const noi = revenue - cogs - opex;
@@ -138,7 +151,14 @@ export function runModel(inp: Inputs): ModelResult {
     const variablePct = inp.cardFeesPct + inp.mgmtFeePct;
     const fixedOpex = opex - revenue * variablePct;
     return { year, units, availableNights: avail, occupiedNights: occN, rate, lodgingBySite, lodging, store, other, revenue, cogs, grossProfit: revenue - cogs, opexLines, borrowerOpex, placeholderOpex, opex, noi, weightedOcc, variablePct, fixedOpex, revenueAt100 };
-  });
+  };
+
+  // ---- 2027: only financed cabins can operate (no cash-built cabins yet) ----
+  const cabinCost = (yi: number) => inp.cabinCostPerUnit * Math.pow(1 + inp.cabinCostEscalation, yi);
+  const rampOcc = (n: number) => (n === 0 ? 0 : inp.cabinOccRamp[Math.min(n, 4) - 1]);
+  const full0 = Math.min(cabinsFinanced, SITE_COUNTS.cabin[0]);
+  const yrsOp0 = full0 > 0 ? 1 : 0;
+  const y0 = opYear(0, full0, rampOcc(yrsOp0), 0);
 
   // ---- Sources & Uses (excluding working capital) ----
   const loanPct = 1 - inp.equityPct;
@@ -150,7 +170,6 @@ export function runModel(inp: Inputs): ModelResult {
   const loanExWc = usesExWc * loanPct;
 
   // ---- 2027 monthly seasonality (debt service on loan excl. working-capital line) ----
-  const y0 = ops[0];
   const monthlyDs = (inp.interestOnlyYears >= 1 ? loanExWc * inp.interestRate : pmt(inp.interestRate / 12, inp.amortYears * 12, loanExWc) * 12) / 12;
   const gridTotal = sumArr(Object.values(RATE_GRID_2027.classAMonthlyRevenue));
   const phFixed2027 = sumArr(y0.opexLines.slice(BORROWER_OPEX.length).filter((l) => !["Card & booking fees", "Management fee"].includes(l.name)).map((l) => l.amount)) / 12;
@@ -174,7 +193,7 @@ export function runModel(inp: Inputs): ModelResult {
 
   const uses = [
     ...CONSTRUCTION_BUDGET.map((c) => ({ name: c.name, amount: sumArr(c.byYear) * mult, placeholder: false })),
-    { name: "Cabins (cost per unit × cabins planned)", amount: cabins, placeholder: true },
+    { name: "Cabins financed at closing (owner: none; cash-funded, see cabin schedule)", amount: cabinsInLoan, placeholder: true },
     { name: "RV pads, roads, power pedestals, water/sewer laterals", amount: rvInfra, placeholder: true },
     { name: "Permits, impact fees & soft costs", amount: inp.softCosts, placeholder: true },
     { name: "Furniture, fixtures & equipment", amount: inp.ffe, placeholder: true },
@@ -190,17 +209,43 @@ export function runModel(inp: Inputs): ModelResult {
   const loan = totalUses - equity;
   const { monthlyPayment, schedule } = amortize(loan, inp.interestRate, inp.amortYears, inp.interestOnlyYears);
 
-  const years: YearResult[] = ops.map((o, yi) => {
-    const s = schedule[yi];
-    const debtService = s.interest + s.principal;
+  // ---- Year-by-year with cash-funded cabin build schedule ----
+  const cabins: CabinYear[] = [];
+  const years: YearResult[] = [];
+  let opening = workingCapital, cumBuilt = 0, cumCapex = 0, yrsOp = 0;
+  for (let yi = 0; yi < YEARS.length; yi++) {
+    const year = YEARS[yi];
+    const costPerCabin = cabinCost(yi);
+    const available = Math.max(0, opening - inp.cabinMinReserve);
+    const built = yi === 0 || year < inp.cabinBuildStartYear || costPerCabin <= 0 ? 0
+      : Math.max(0, Math.min(inp.cabinsPlanned - cabinsFinanced - cumBuilt, Math.floor(available / costPerCabin)));
+    const operatingFull = Math.min(cabinsFinanced, SITE_COUNTS.cabin[yi]) + cumBuilt;
+    const effectiveUnits = operatingFull + built * inp.cabinBuildYearShare;
+    yrsOp = effectiveUnits > 0 ? yrsOp + 1 : 0;
+    const occupancy = rampOcc(yrsOp);
+    const o = yi === 0 ? y0 : opYear(yi, effectiveUnits, occupancy, cumCapex);
+    const sch = schedule[yi];
+    const debtService = sch.interest + sch.principal;
     const dscr = debtService ? o.noi / debtService : 0;
     const be = (extra: number) => (o.revenueAt100 ? ((o.fixedOpex + o.cogs + extra) / (1 - o.variablePct) - o.store - o.other) / o.revenueAt100 : 0);
-    return {
-      ...o, debtService, interest: s.interest, principal: s.principal, endBalance: s.end,
+    const yr: YearResult = {
+      ...o, debtService, interest: sch.interest, principal: sch.principal, endBalance: sch.end,
       cashFlow: o.noi - debtService, dscr, meetsMin: dscr >= inp.minDscr,
       breakEvenNoi: be(0), breakEvenDscr1: be(debtService), occForMinDscr: be(debtService * inp.minDscr),
     };
-  });
+    years.push(yr);
+    const capex = built * costPerCabin;
+    cumBuilt += built; cumCapex += capex;
+    const endingCash = opening + yr.cashFlow - capex;
+    cabins.push({ year, openingCash: opening, cashFlow: yr.cashFlow, available, costPerCabin, built, cumulativeBuilt: cumBuilt, capex, endingCash, cumulativeCapex: cumCapex, operatingFull, effectiveUnits, yearsOperated: yrsOp, occupancy });
+    opening = endingCash;
+  }
+  const ops = years;
+  const cabinsUnbuilt = inp.cabinsPlanned - cabinsFinanced - cumBuilt;
+  const cabinNote = inp.cabinCostPerUnit <= 0 ? "Cabin cost is $0/missing: no cabins scheduled."
+    : Math.min(...cabins.map((c) => c.endingCash)) < 0 ? "Cash goes negative: the park cannot self-fund cabins (and needs more equity or a credit line)."
+    : cumBuilt === 0 ? "Cash never exceeds reserve + cabin cost: no cabins built by 2031."
+    : `${cumBuilt} cabin${cumBuilt === 1 ? "" : "s"} built from cash by 2031; ${cabinsUnbuilt} still unbuilt vs. plan.`;
 
   // ---- Sensitivity (stabilized 2030) ----
   const y30 = years[3];
@@ -223,9 +268,9 @@ export function runModel(inp: Inputs): ModelResult {
 
   // Mirrors the workbook's "inputs still at $0 / 0%" counter.
   const sumY = (f: (y: (typeof ops)[number], i: number) => number) => sumArr(ops.map(f));
-  const occSum = (k: SiteType, from = 0) => sumArr(inp.occupancy[k].slice(from));
+  const occSum = (k: RvSiteType, from = 0) => sumArr(inp.occupancy[k].slice(from));
   const zeroChecks = [
-    inp.seasonNights, occSum("classA", 1), occSum("classBC"), occSum("tent"), occSum("cabin"), inp.rates.tent, inp.rates.cabin,
+    inp.seasonNights, occSum("classA", 1), occSum("classBC"), occSum("tent"), sumArr(inp.cabinOccRamp), inp.rates.tent, inp.rates.cabin,
     inp.annualRateIncrease, sumY((y) => y.store), inp.storeCogsPct, sumY((y) => y.other),
     sumArr(inp.insurance), sumY((y) => y.opexLines[BORROWER_OPEX.length + 1].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 2].amount),
     sumY((y) => y.opexLines[BORROWER_OPEX.length + 3].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 4].amount),
@@ -241,5 +286,6 @@ export function runModel(inp: Inputs): ModelResult {
     monthly, peakShortfall, negativeMonths: monthly.filter((m) => m.cashFlow < 0).length,
     lowestMonth: monthly.find((m) => m.cumulative === lowest)?.month ?? "",
     sens1, sens2, placeholderCount, costPerRvSite: totalUses / stabilizedRv,
+    cabins, cabinsBuiltTotal: cumBuilt, cabinsUnbuilt, cabinNote,
   };
 }
