@@ -1,5 +1,5 @@
 import {
-  BORROWER_OPEX, CONSTRUCTION_BUDGET, Inputs, MONTHS, PRE_OPENING_COSTS, RATE_GRID_2027,
+  OpexLine, BORROWER_OPEX, CONSTRUCTION_BUDGET, Inputs, MONTHS, PRE_OPENING_COSTS, RATE_GRID_2027,
   RvSiteType, SITE_COUNTS, SITE_TYPES, SiteType, YEARS,
 } from "./data";
 
@@ -67,6 +67,9 @@ export interface ModelResult {
   cabinsBuiltTotal: number;
   cabinsUnbuilt: number;
   cabinNote: string;
+  effectiveRate: number;
+  cdcShare: number;
+  seasonNightsEffective: number;
 }
 
 export interface CabinYear {
@@ -76,6 +79,29 @@ export interface CabinYear {
 }
 
 const sumArr = (a: number[]) => a.reduce((s, v) => s + v, 0);
+
+/** Borrower expense lines with the viable-scenario overrides applied. */
+function borrowerLines(inp: Inputs): OpexLine[] {
+  const g = (yi: number) => Math.pow(1 + inp.expenseInflation, yi);
+  return BORROWER_OPEX.map((l) => {
+    if (l.name.startsWith("General manager") && inp.ownerManagerComp !== null) {
+      const c = inp.ownerManagerComp;
+      return { ...l, monthly2027: [0, 0, 0, ...Array(9).fill(c / 12)], annual: [c * 0.75, c * g(1), c * g(2), c * g(3)], carried: [] };
+    }
+    if (l.name.startsWith("Sales, marketing") && inp.marketing2027Monthly !== null) {
+      const m28 = inp.marketing2028Monthly ?? inp.marketing2027Monthly;
+      return { ...l, monthly2027: Array(12).fill(inp.marketing2027Monthly), annual: [0, m28 * 12, m28 * 12 * g(1), m28 * 12 * g(2)], carried: [] };
+    }
+    if (l.name === "General store staff" && inp.storeStaffSeasonalOnly) {
+      const m = [0, 0, 0, ...Array(7).fill(4833), 0, 0];
+      return { ...l, monthly2027: m, annual: [0, sumArr(m), sumArr(m), 0], carried: [3] };
+    }
+    if (l.name === "Groundskeeper / cleaning staff (seasonal)" && inp.seasonalGroundsThroughOct) {
+      return { ...l, annual: [0, 3333 * 6, 0, 0], carried: [2, 3] };
+    }
+    return l;
+  });
+}
 
 const roundTo = (v: number, step: number) => Math.round(v / step) * step;
 
@@ -91,8 +117,16 @@ export function runModel(inp: Inputs): ModelResult {
   const contingency = inp.contingencyPct * hardCost;
   const taxFactor = inp.assessedPctOfHardCost * inp.propertyTaxRate;
 
-  // ---- Borrower opex by year (carried-forward blank years inflate from prior year) ----
-  const borrowerAnnual = BORROWER_OPEX.map((l) => {
+  // ---- Loan structure: 7(a) single rate or SBA 504 blended (bank first lien + CDC debenture) ----
+  const cdcShare = Math.max(0, 1 - inp.bankShare - inp.equityPct);
+  const is504 = inp.loanStructure === "504" && inp.bankShare + cdcShare > 0;
+  const rate = is504 ? (inp.bankShare * inp.bankRate + cdcShare * inp.cdcRate) / (inp.bankShare + cdcShare) : inp.interestRate;
+
+  // ---- Borrower opex (lever overrides; carried-forward blank years inflate from prior year) ----
+  const g = (yi: number) => Math.pow(1 + inp.expenseInflation, yi);
+  const lines = borrowerLines(inp);
+  const borrowerMonthly2027 = lines.map((l) => l.monthly2027.map((v) => v * inp.borrowerOpexMultiplier));
+  const borrowerAnnual = lines.map((l) => {
     const out: number[] = [];
     for (let yi = 0; yi < 4; yi++) {
       if (yi === 0) out.push(sumArr(l.monthly2027));
@@ -102,6 +136,7 @@ export function runModel(inp: Inputs): ModelResult {
     out.push(out[3] * (1 + inp.expenseInflation));
     return out.map((v) => v * inp.borrowerOpexMultiplier);
   });
+  const nights = inp.seasonNights + inp.shoulderNights * inp.shoulderOccFactor;
 
   /** One operating year given the cabins operating that year. */
   const opYear = (yi: number, cabinUnits: number, cabinOcc: number, priorCabinCapex: number) => {
@@ -114,20 +149,21 @@ export function runModel(inp: Inputs): ModelResult {
     let revenueAt100 = 0;
     for (const { key } of SITE_TYPES) {
       units[key] = key === "cabin" ? cabinUnits : SITE_COUNTS[key][yi];
-      avail[key] = units[key] * inp.seasonNights;
+      avail[key] = units[key] * nights;
       const occ = key === "cabin" ? cabinOcc : inp.occupancy[key][yi];
       occN[key] = avail[key] * Math.min(1, occ * inp.occupancyMultiplier);
-      rate[key] = inp.rates[key] * Math.pow(1 + inp.annualRateIncrease, yi);
+      const base = key === "classA" || key === "classBC" ? inp.rates[key] * (1 - inp.marketRateWeight) + inp.marketRate * inp.marketRateWeight : inp.rates[key];
+      rate[key] = base * Math.pow(1 + inp.annualRateIncrease, yi);
       lodgingBySite[key] = occN[key] * rate[key];
       revenueAt100 += avail[key] * rate[key];
     }
     const occupiedNights = sumArr(Object.values(occN));
     const lodging = sumArr(Object.values(lodgingBySite));
     const store = Math.round(occupiedNights * inp.storeSalesPerNight);
-    const other = Math.round(occupiedNights * inp.otherIncomePerNight);
+    const other = Math.round(occupiedNights * inp.otherIncomePerNight) + Math.round(inp.storageUnits * inp.storageRatePerMonth * (yi === 0 ? Math.min(2, inp.storageMonths) : inp.storageMonths) * g(yi));
     const revenue = lodging + store + other;
     const cogs = store * inp.storeCogsPct;
-    const opexLines: YearResult["opexLines"] = BORROWER_OPEX.map((l, li) => ({
+    const opexLines: YearResult["opexLines"] = lines.map((l, li) => ({
       name: l.name, amount: borrowerAnnual[li][yi], placeholder: !!l.carried?.length,
     }));
     const totalUnits = sumArr(Object.values(units));
@@ -135,7 +171,7 @@ export function runModel(inp: Inputs): ModelResult {
       ["Insurance (property, liability, workers comp)", inp.insurance[yi] + inp.insurancePerCabin * cabinUnits],
       ["Property / personal property tax", roundTo(hardCost * taxFactor * inp.taxPhaseIn[yi] + (yi > 0 ? priorCabinCapex * taxFactor : 0), 100)],
       ["Repairs & maintenance", Math.round(revenue * inp.rmPctOfRevenue[yi])],
-      ["Water, trash, propane & other utilities", totalUnits * inp.utilitiesPerUnit[yi]],
+      ["Water, trash, propane & other utilities", totalUnits * inp.utilitiesPerUnit[yi] + inp.shoulderUtilities * g(yi)],
       ["Cabin & bathhouse housekeeping / supplies", occN.cabin * inp.housekeepingPerCabinNight + inp.bathhouseSupplies[yi]],
       ["Card & booking fees", revenue * inp.cardFeesPct],
       ["Management fee", revenue * inp.mgmtFeePct],
@@ -162,23 +198,27 @@ export function runModel(inp: Inputs): ModelResult {
 
   // ---- Sources & Uses (excluding working capital) ----
   const loanPct = 1 - inp.equityPct;
-  const interestReserve = inp.interestReserveOverride ?? roundTo(hardCost * loanPct * 0.5 * inp.interestRate * 9 / 12, 1000);
+  const interestReserve = inp.interestReserveOverride ?? roundTo(hardCost * loanPct * 0.5 * rate * 9 / 12, 1000);
   const closingBase = 0.75 * (hardCost + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + interestReserve) * loanPct;
-  const closingCosts = inp.closingCostsOverride ??
-    roundTo(Math.min(closingBase, 1_000_000) * 0.035 + Math.max(closingBase - 1_000_000, 0) * 0.0375 + inp.closingThirdParty, 100);
+  const closingCosts = inp.closingCostsOverride ?? (is504
+    ? roundTo((hardCost + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + interestReserve) * loanPct *
+        ((cdcShare * inp.cdcFeePct + inp.bankShare * inp.bankFeePct) / (inp.bankShare + cdcShare)) + inp.closingThirdParty, 100)
+    : roundTo(Math.min(closingBase, 1_000_000) * 0.035 + Math.max(closingBase - 1_000_000, 0) * 0.0375 + inp.closingThirdParty, 100));
   const usesExWc = hardCost + inp.softCosts + inp.ffe + contingency + PRE_OPENING_COSTS + interestReserve + closingCosts + inp.landAcquisition;
   const loanExWc = usesExWc * loanPct;
 
   // ---- 2027 monthly seasonality (debt service on loan excl. working-capital line) ----
-  const monthlyDs = (inp.interestOnlyYears >= 1 ? loanExWc * inp.interestRate : pmt(inp.interestRate / 12, inp.amortYears * 12, loanExWc) * 12) / 12;
+  const monthlyDs = (inp.interestOnlyYears >= 1 ? loanExWc * rate : pmt(rate / 12, inp.amortYears * 12, loanExWc) * 12) / 12;
   const gridTotal = sumArr(Object.values(RATE_GRID_2027.classAMonthlyRevenue));
   const phFixed2027 = sumArr(y0.opexLines.slice(BORROWER_OPEX.length).filter((l) => !["Card & booking fees", "Management fee"].includes(l.name)).map((l) => l.amount)) / 12;
   let cum = 0;
   const monthly = MONTHS.map((m, mi) => {
-    const share = (RATE_GRID_2027.classAMonthlyRevenue[m] ?? 0) / gridTotal;
+    const extra = inp.shoulderNights * inp.shoulderOccFactor;
+    const shoulderPart = m === "Sep" ? 24 / 55 : m === "Oct" ? 31 / 55 : 0;
+    const share = ((RATE_GRID_2027.classAMonthlyRevenue[m] ?? 0) / gridTotal) * inp.seasonNights / (inp.seasonNights + extra) + extra * shoulderPart / (inp.seasonNights + extra);
     const revenue = y0.revenue * share;
     const cogs = y0.cogs * share;
-    const borrowerOpex = sumArr(BORROWER_OPEX.map((l) => l.monthly2027[mi])) * inp.borrowerOpexMultiplier;
+    const borrowerOpex = sumArr(borrowerMonthly2027.map((l) => l[mi]));
     const variableFees = revenue * y0.variablePct;
     const noi = revenue - cogs - borrowerOpex - phFixed2027 - variableFees;
     const cashFlow = noi - monthlyDs;
@@ -189,7 +229,19 @@ export function runModel(inp: Inputs): ModelResult {
   const peakShortfall = Math.min(0, lowest);
   const carryMonths = monthly.slice(0, Math.max(0, Math.min(12, inp.workingCapitalExtraMonths)));
   const offSeasonCarry = sumArr(carryMonths.map((m) => m.borrowerOpex + m.placeholderOpex + m.debtService));
-  const workingCapital = inp.workingCapitalOverride ?? -peakShortfall + offSeasonCarry;
+  const wcMonthly = -peakShortfall + offSeasonCarry;
+  let wcAuto = wcMonthly;
+  if (inp.wcKeepMinCashThrough2028) {
+    // Reserve so that year-end 2027 and 2028 cash stay ≥ the minimum reserve (closed form, no circularity).
+    const annualPerDollar = 12 * pmt(rate / 12, inp.amortYears * 12, 1);
+    const ds27 = inp.interestOnlyYears >= 1 ? rate : annualPerDollar;
+    const ds28 = inp.interestOnlyYears >= 2 ? rate : annualPerDollar;
+    const y1 = opYear(1, Math.min(cabinsFinanced, SITE_COUNTS.cabin[1]), rampOcc(Math.min(cabinsFinanced, SITE_COUNTS.cabin[1]) > 0 ? yrsOp0 + 1 : 0), 0);
+    const r27 = (inp.cabinMinReserve - y0.noi + usesExWc * loanPct * ds27) / (1 - loanPct * ds27);
+    const r28 = (inp.cabinMinReserve - y0.noi - y1.noi + usesExWc * loanPct * (ds27 + ds28)) / (1 - loanPct * (ds27 + ds28));
+    wcAuto = Math.ceil(Math.max(r27, r28, wcMonthly, 0) / 5000) * 5000;
+  }
+  const workingCapital = inp.workingCapitalOverride ?? wcAuto;
 
   const uses = [
     ...CONSTRUCTION_BUDGET.map((c) => ({ name: c.name, amount: sumArr(c.byYear) * mult, placeholder: false })),
@@ -207,7 +259,7 @@ export function runModel(inp: Inputs): ModelResult {
   const totalUses = usesExWc + workingCapital;
   const equity = Math.round(totalUses * inp.equityPct);
   const loan = totalUses - equity;
-  const { monthlyPayment, schedule } = amortize(loan, inp.interestRate, inp.amortYears, inp.interestOnlyYears);
+  const { monthlyPayment, schedule } = amortize(loan, rate, inp.amortYears, inp.interestOnlyYears);
 
   // ---- Year-by-year with cash-funded cabin build schedule ----
   const cabins: CabinYear[] = [];
@@ -256,7 +308,7 @@ export function runModel(inp: Inputs): ModelResult {
     grid: occChanges.map((oc) => rateChanges.map((rc) =>
       y30.debtService ? ((y30.lodging * (1 + oc) * (1 + rc) + y30.store + y30.other) * (1 - y30.variablePct) - y30.cogs - y30.fixedOpex) / y30.debtService : 0)),
   };
-  const rates = [-0.02, -0.01, 0, 0.01, 0.02, 0.03].map((d) => inp.interestRate + d);
+  const rates = [-0.02, -0.01, 0, 0.01, 0.02, 0.03].map((d) => rate + d);
   const overruns = [0, 0.1, 0.25, 0.5, 1];
   const sens2 = {
     rates, overruns,
@@ -275,7 +327,7 @@ export function runModel(inp: Inputs): ModelResult {
     sumArr(inp.insurance), sumY((y) => y.opexLines[BORROWER_OPEX.length + 1].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 2].amount),
     sumY((y) => y.opexLines[BORROWER_OPEX.length + 3].amount), sumY((y) => y.opexLines[BORROWER_OPEX.length + 4].amount),
     inp.cardFeesPct, inp.mgmtFeePct, inp.replacementReservePerSite, inp.expenseInflation, inp.cabinCostPerUnit, inp.rvSiteInfrastructure,
-    inp.softCosts, inp.ffe, inp.contingencyPct, workingCapital, interestReserve, closingCosts, inp.equityPct, inp.interestRate,
+    inp.softCosts, inp.ffe, inp.contingencyPct, workingCapital, interestReserve, closingCosts, inp.equityPct, rate,
     inp.amortYears, inp.interestOnlyYears, inp.minDscr,
   ];
   const placeholderCount = zeroChecks.filter((v) => v === 0).length;
@@ -286,6 +338,6 @@ export function runModel(inp: Inputs): ModelResult {
     monthly, peakShortfall, negativeMonths: monthly.filter((m) => m.cashFlow < 0).length,
     lowestMonth: monthly.find((m) => m.cumulative === lowest)?.month ?? "",
     sens1, sens2, placeholderCount, costPerRvSite: totalUses / stabilizedRv,
-    cabins, cabinsBuiltTotal: cumBuilt, cabinsUnbuilt, cabinNote,
+    cabins, cabinsBuiltTotal: cumBuilt, cabinsUnbuilt, cabinNote, effectiveRate: rate, cdcShare: is504 ? cdcShare : 0, seasonNightsEffective: nights,
   };
 }

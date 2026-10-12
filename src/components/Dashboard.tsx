@@ -5,7 +5,7 @@ import {
   Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, Pie, PieChart, ReferenceLine,
   ResponsiveContainer, Cell, Tooltip, XAxis, YAxis,
 } from "recharts";
-import { Inputs, RvSiteType, PLACEHOLDER_KEYS, REVIEW_NOTES, SCENARIO_DEFAULTS, Scenario, SITE_TYPES, SiteType, Y5, YEARS } from "@/lib/data";
+import { ESTIMATED_INPUTS, Inputs, Lever, LEVERS, LEVER_NOTE, LEVER_SUMMARY, RvSiteType, PLACEHOLDER_KEYS, REVIEW_NOTES, SCENARIO_DEFAULTS, Scenario, SITE_TYPES, SiteType, Y5, YEARS } from "@/lib/data";
 import { ESTIMATE_BY_KEY, ESTIMATE_NOTES, ESTIMATE_SOURCES, ESTIMATE_URLS } from "@/lib/estimates";
 import { runModel } from "@/lib/model";
 
@@ -30,18 +30,32 @@ function EstimateBadge({ k }: { k: string }) {
   );
 }
 
+const LEVER_BY_KEY: Record<string, Lever> = {};
+for (const l of LEVERS) for (const k of l.keys) LEVER_BY_KEY[k] ??= l;
+function LeverBadge({ k }: { k: string }) {
+  const l = LEVER_BY_KEY[k];
+  return (
+    <span title={`Lever ${l.id}: ${l.name}\nChange: ${l.change}\nMust prove: ${l.mustProve}`} className="ml-1 cursor-help rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">
+      Lever {l.id}
+    </span>
+  );
+}
+const leverIsOn = (l: Lever, inp: Inputs) => !!l.on && Object.entries(l.on).every(([k, v]) => inp[k as keyof Inputs] === v);
+
 /** Scenario-aware tag: blue Estimate badge in estimated mode, yellow Placeholder badge in placeholder mode. */
 const ScenarioCtx = createContext<Scenario>("placeholder");
 function Tag({ k }: { k?: string }) {
   const scenario = useContext(ScenarioCtx);
   if (!k) return null;
-  if (scenario === "estimated") return ESTIMATE_BY_KEY[k] ? <EstimateBadge k={k} /> : null;
+  if (scenario === "viable" && LEVER_BY_KEY[k]) return <LeverBadge k={k} />;
+  if (scenario !== "placeholder") return ESTIMATE_BY_KEY[k] ? <EstimateBadge k={k} /> : null;
   return PLACEHOLDER_KEYS.has(k) ? <Badge /> : null;
 }
 function useTagBg(k?: string) {
   const scenario = useContext(ScenarioCtx);
   if (!k) return "";
-  if (scenario === "estimated") return ESTIMATE_BY_KEY[k] ? "bg-sky-50" : "";
+  if (scenario === "viable" && LEVER_BY_KEY[k]) return "bg-emerald-50";
+  if (scenario !== "placeholder") return ESTIMATE_BY_KEY[k] ? "bg-sky-50" : "";
   return PLACEHOLDER_KEYS.has(k) ? "bg-amber-50" : "";
 }
 
@@ -201,6 +215,7 @@ const USE_KEYS: Record<string, string> = {
 const SCENARIOS: { key: Scenario; label: string; sub: string }[] = [
   { key: "placeholder", label: "Placeholder", sub: "Owner inputs only" },
   { key: "estimated", label: "Estimated", sub: "Best-guess fills" },
+  { key: "viable", label: "Path to 1.25x (viable plan)", sub: "Estimated + 12 levers" },
 ];
 
 export default function Dashboard() {
@@ -214,7 +229,16 @@ export default function Dashboard() {
   const set = <K extends keyof Inputs>(k: K) => (v: Inputs[K]) => setInp((p) => ({ ...p, [k]: v }));
   const setOcc = (k: RvSiteType) => (v: Y5) => setInp((p) => ({ ...p, occupancy: { ...p.occupancy, [k]: v } }));
   const setRate = (k: SiteType) => (v: number) => setInp((p) => ({ ...p, rates: { ...p.rates, [k]: v } }));
-  const estimated = scenario === "estimated";
+  const estimated = scenario !== "placeholder";
+  const viable = scenario === "viable";
+  const toggleLever = (l: Lever) => setInp((p) => {
+    if (!l.on) return p;
+    if (leverIsOn(l, p)) {
+      const off = Object.fromEntries(Object.keys(l.on).map((k) => [k, ESTIMATED_INPUTS[k as keyof Inputs]]));
+      return { ...p, ...off };
+    }
+    return { ...p, ...l.on };
+  });
 
   const stab = r.years[3];
   const minDscrYear = r.years.slice(1).reduce((a, b) => (b.dscr < a.dscr ? b : a));
@@ -242,7 +266,7 @@ export default function Dashboard() {
             <div role="radiogroup" aria-label="Scenario" data-testid="scenario-toggle" className="flex rounded-xl bg-white/10 p-1 ring-1 ring-white/30">
               {SCENARIOS.map((s) => (
                 <button key={s.key} role="radio" aria-checked={scenario === s.key} onClick={() => switchScenario(s.key)}
-                  className={`rounded-lg px-4 py-2 text-left transition ${scenario === s.key ? (s.key === "estimated" ? "bg-sky-400 text-[#0b2440] shadow" : "bg-amber-300 text-[#3b2a00] shadow") : "text-white hover:bg-white/10"}`}>
+                  className={`rounded-lg px-4 py-2 text-left transition ${scenario === s.key ? (s.key === "viable" ? "bg-emerald-400 text-[#052e1c] shadow" : s.key === "estimated" ? "bg-sky-400 text-[#0b2440] shadow" : "bg-amber-300 text-[#3b2a00] shadow") : "text-white hover:bg-white/10"}`}>
                   <div className="text-sm font-semibold">{s.label}</div>
                   <div className="text-[11px] opacity-80">{s.sub}</div>
                 </button>
@@ -258,10 +282,15 @@ export default function Dashboard() {
         {estimated && failingYears.length > 0 && (
           <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
             <strong>DSCR is below the lender minimum of {x(inp.minDscr)} in {failingYears.join(", ")}.</strong> Lowest operating-year coverage is {x(minDscrYear.dscr)} ({minDscrYear.year}); 2030 is {x(stab.dscr)}.
-            With realistic costs filled in, projected NOI does not cover debt service. The project needs more equity, lower costs, higher revenue, or different loan terms to qualify.
+            {viable ? <>Even with all levers, 2027 (ramp-up) and 2028 are below 1.25x; the reserve funded at closing carries those years. Coverage clears the minimum from 2029 only if every lever is proven.</> : <>With realistic costs filled in, projected NOI does not cover debt service. The project needs more equity, lower costs, higher revenue, or different loan terms to qualify.</>}
           </div>
         )}
-        {estimated ? (
+        {viable ? (
+          <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+            <strong>Path to 1.25x (viable plan):</strong> the Estimated scenario plus {LEVERS.length} levers. Changed inputs are marked <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">Lever</span>; see the Levers panel to switch each one on or off.
+            This is a plan a lender could underwrite only if each item in &quot;What must be proven&quot; is documented. It is not a forecast. {LEVER_SUMMARY}
+          </div>
+        ) : estimated ? (
           <div className="rounded-lg border border-sky-300 bg-sky-50 px-4 py-3 text-sm text-sky-900">
             <strong>Estimated scenario:</strong> {ESTIMATE_SOURCES.length} former placeholders are filled with best-guess estimates, marked <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-800">Estimate</span> (hover for basis &amp; confidence).
             These are starting estimates to edit, not verified figures. Replace each with a quote, bid, comp survey or lender term sheet before submission.
@@ -276,18 +305,23 @@ export default function Dashboard() {
 
       <div className="mx-auto grid max-w-[1500px] gap-6 px-6 py-6 lg:grid-cols-[360px_1fr]">
         <aside className="h-fit rounded-xl border border-slate-200 bg-white p-4 shadow-sm lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto print:hidden">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Assumptions · {estimated ? "Estimated" : "Placeholder"}</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Assumptions · {viable ? "Viable plan" : estimated ? "Estimated" : "Placeholder"}</h2>
           <Group title="Occupancy by year" open>
             <Slider label="Occupancy adjustment (all types & years)" value={inp.occupancyMultiplier} onChange={set("occupancyMultiplier")} min={0.5} max={1.5} step={0.01} format="x" />
             {SITE_TYPES.filter((s) => s.key !== "cabin").map((s) => (
               <YearRow key={s.key} label={s.label} values={inp.occupancy[s.key as RvSiteType]} onChange={setOcc(s.key as RvSiteType)} format="pct" step={1} tag={`occupancy.${s.key}`} />
             ))}
             <Slider label="Season length (nights open)" value={inp.seasonNights} onChange={set("seasonNights")} min={60} max={365} step={1} format="num" tag="seasonNights" />
+            <Slider label="Extended-season nights (Sep 7 – Oct 31)" value={inp.shoulderNights} onChange={set("shoulderNights")} min={0} max={90} step={1} format="num" tag="shoulderNights" />
+            <Slider label="Extended-season occupancy vs. peak" value={inp.shoulderOccFactor} onChange={set("shoulderOccFactor")} min={0} max={1} step={0.05} format="pct" tag="shoulderNights" />
+            <NumField label="Extra utilities for extended season ($/yr)" value={inp.shoulderUtilities} onChange={set("shoulderUtilities")} tag="shoulderUtilities" step={250} />
           </Group>
           <Group title="Nightly rates (2027 base)" open>
             {SITE_TYPES.map((s) => (
               <Slider key={s.key} label={s.label} value={inp.rates[s.key]} onChange={setRate(s.key)} min={0} max={250} step={0.5} format="usd" tag={`rates.${s.key}`} />
             ))}
+            <Slider label="Market comp rate (Class A & B/C)" value={inp.marketRate} onChange={set("marketRate")} min={0} max={120} step={0.5} format="usd" tag="marketRateWeight" />
+            <Slider label="Weight toward market rate" value={inp.marketRateWeight} onChange={set("marketRateWeight")} min={0} max={1} step={0.05} format="pct" tag="marketRateWeight" />
             <Slider label="Annual rate increase" value={inp.annualRateIncrease} onChange={set("annualRateIncrease")} min={0} max={0.1} step={0.005} format="pct" tag="annualRateIncrease" />
           </Group>
           <Group title="Cabins (cash-funded build-out)" open>
@@ -302,7 +336,23 @@ export default function Dashboard() {
             <RampRow values={inp.cabinOccRamp} onChange={set("cabinOccRamp")} />
           </Group>
           <Group title="Financing" open>
-            <Slider label="Interest rate" value={inp.interestRate} onChange={set("interestRate")} min={0.03} max={0.14} step={0.0025} format="pct" tag="interestRate" />
+            <div className="flex gap-1 px-2 py-1 text-xs" role="radiogroup" aria-label="Loan structure">
+              {(["7a", "504"] as const).map((k) => (
+                <button key={k} role="radio" aria-checked={inp.loanStructure === k} onClick={() => set("loanStructure")(k)}
+                  className={`flex-1 rounded px-2 py-1 font-semibold ${inp.loanStructure === k ? "bg-[#1e3a5f] text-white" : "bg-slate-100 text-slate-700"}`}>
+                  {k === "7a" ? "SBA 7(a)" : "SBA 504 blended"}
+                </button>
+              ))}
+              <Tag k="loanStructure" />
+            </div>
+            {inp.loanStructure === "504" && (<>
+              <p className="px-2 text-[11px] text-slate-500">Blended rate {(r.effectiveRate * 100).toFixed(3)}% · bank {pct(inp.bankShare)} / CDC {pct(r.cdcShare)} / equity {pct(inp.equityPct)}.</p>
+              <Slider label="Bank first-lien share" value={inp.bankShare} onChange={set("bankShare")} min={0.3} max={0.7} step={0.01} format="pct" tag="loanStructure" />
+              <Slider label="Bank rate" value={inp.bankRate} onChange={set("bankRate")} min={0.04} max={0.12} step={0.0025} format="pct" tag="loanStructure" />
+              <Slider label="CDC debenture rate" value={inp.cdcRate} onChange={set("cdcRate")} min={0.04} max={0.1} step={0.0001} format="pct" tag="loanStructure" />
+              <Slider label="CDC fees (% of debenture)" value={inp.cdcFeePct} onChange={set("cdcFeePct")} min={0} max={0.05} step={0.0005} format="pct" tag="loanStructure" />
+            </>)}
+            {inp.loanStructure === "7a" && <Slider label="Interest rate" value={inp.interestRate} onChange={set("interestRate")} min={0.03} max={0.14} step={0.0025} format="pct" tag="interestRate" />}
             <Slider label="Amortization (years)" value={inp.amortYears} onChange={set("amortYears")} min={5} max={30} step={1} format="num" tag="amortYears" />
             <Slider label="Interest-only years" value={inp.interestOnlyYears} onChange={set("interestOnlyYears")} min={0} max={3} step={1} format="num" tag="interestOnlyYears" />
             <Slider label="Equity injection %" value={inp.equityPct} onChange={set("equityPct")} min={0} max={0.6} step={0.01} format="pct" tag="equityPct" />
@@ -316,6 +366,10 @@ export default function Dashboard() {
             <Slider label="Hard-cost contingency" value={inp.contingencyPct} onChange={set("contingencyPct")} min={0} max={0.25} step={0.005} format="pct" tag="contingencyPct" />
             <AutoField label="Interest reserve (auto = hard cost × loan % × 50% × rate × 9/12)" value={inp.interestReserveOverride} auto={autoIr} onChange={set("interestReserveOverride")} tag="interestReserve" />
             <AutoField label="Closing costs (auto = SBA 7(a) guaranty fee + third-party)" value={inp.closingCostsOverride} auto={autoCc} onChange={set("closingCostsOverride")} tag="closingCosts" />
+            <label className="flex items-center gap-2 px-2 py-1 text-xs text-slate-700">
+              <input type="checkbox" checked={inp.wcKeepMinCashThrough2028} onChange={(e) => set("wcKeepMinCashThrough2028")(e.target.checked)} />
+              Size reserve so cash stays ≥ minimum through 2028 <Tag k="workingCapital" />
+            </label>
             <AutoField label="Working capital (auto = peak 2027 shortfall + off-season months)" value={inp.workingCapitalOverride} auto={autoWc} onChange={set("workingCapitalOverride")} tag="workingCapital" />
             <Slider label="Off-season carry months in working capital" value={inp.workingCapitalExtraMonths} onChange={set("workingCapitalExtraMonths")} min={0} max={6} step={1} format="num" tag="workingCapital" />
             <NumField label="Land acquisition" value={inp.landAcquisition} onChange={set("landAcquisition")} tag="landAcquisition" />
@@ -334,11 +388,21 @@ export default function Dashboard() {
             <YearRow label="Bathhouse supplies" values={inp.bathhouseSupplies} onChange={set("bathhouseSupplies")} format="usd" step={500} tag="housekeeping" />
             <Slider label="Card & booking fees (% rev.)" value={inp.cardFeesPct} onChange={set("cardFeesPct")} min={0} max={0.08} step={0.0025} format="pct" tag="cardFeesPct" />
             <Slider label="Management fee (% rev.)" value={inp.mgmtFeePct} onChange={set("mgmtFeePct")} min={0} max={0.12} step={0.005} format="pct" tag="mgmtFeePct" />
+            <NumField label="Owner-manager salary ($/yr; blank = borrower GM line)" value={inp.ownerManagerComp ?? 0} onChange={(v) => set("ownerManagerComp")(v ? v : null)} tag="ownerManagerComp" step={5000} />
+            <label className="flex items-center gap-2 px-2 py-1 text-xs text-slate-700">
+              <input type="checkbox" checked={inp.storeStaffSeasonalOnly} onChange={(e) => set("storeStaffSeasonalOnly")(e.target.checked)} />
+              Store staff in season only (Apr–Oct) <Tag k="storeStaffSeasonalOnly" />
+            </label>
+            <NumField label="Marketing & booking software 2027 ($/mo; 0 = borrower line)" value={inp.marketing2027Monthly ?? 0} onChange={(v) => set("marketing2027Monthly")(v ? v : null)} tag="marketing" step={250} />
+            <NumField label="Marketing & booking software 2028+ ($/mo)" value={inp.marketing2028Monthly ?? 0} onChange={(v) => set("marketing2028Monthly")(v ? v : null)} tag="marketing" step={250} />
             <NumField label="Replacement reserve ($/site/yr)" value={inp.replacementReservePerSite} onChange={set("replacementReservePerSite")} tag="replacementReservePerSite" step={25} />
           </Group>
           <Group title="Store & other income">
             <Slider label="Store sales per occupied night" value={inp.storeSalesPerNight} onChange={set("storeSalesPerNight")} min={0} max={15} step={0.5} format="usd" tag="storeSalesPerNight" />
             <Slider label="Store COGS %" value={inp.storeCogsPct} onChange={set("storeCogsPct")} min={0} max={0.9} step={0.01} format="pct" tag="storeCogsPct" />
+            <Slider label="Off-season storage units" value={inp.storageUnits} onChange={set("storageUnits")} min={0} max={120} step={1} format="num" tag="storageUnits" />
+            <Slider label="Storage rate ($/unit/month)" value={inp.storageRatePerMonth} onChange={set("storageRatePerMonth")} min={0} max={150} step={5} format="usd" tag="storageUnits" />
+            <Slider label="Storage months per winter" value={inp.storageMonths} onChange={set("storageMonths")} min={0} max={7} step={1} format="num" tag="storageUnits" />
             <Slider label="Other income per occupied night" value={inp.otherIncomePerNight} onChange={set("otherIncomePerNight")} min={0} max={10} step={0.5} format="usd" tag="otherIncomePerNight" />
           </Group>
         </aside>
@@ -581,6 +645,39 @@ export default function Dashboard() {
               </div>
             </Card>
           </div>
+
+          <Card title="Levers: path to 1.25x" className={viable ? "ring-2 ring-emerald-300" : ""}>
+            <div data-testid="levers-panel">
+              <p className="mb-2 text-xs text-slate-600">Each lever changes inputs versus the Estimated scenario. The snapshot columns show the workbook&apos;s drop-one impact (switch that lever off, all others on). {viable ? "Use the switches to see the live effect." : "Switch to the viable plan to use the toggles."}</p>
+              <p className="mb-3 text-xs text-slate-500">Live: DSCR 2029 <strong>{x(r.years[2].dscr)}</strong> · 2030 <strong>{x(stab.dscr)}</strong> · 2031 <strong>{x(r.years[4].dscr)}</strong> · Loan {usd(r.loan)} · Equity {usd(r.equity)}</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b text-left text-slate-500">
+                    <th className="py-1 pr-2">On</th><th className="pr-2">Lever</th><th className="pr-2">Change</th><th className="pr-2 text-right">Δ NOI 2030</th><th className="pr-2 text-right">Δ DSCR 2030</th><th className="pr-2">Aggressiveness</th><th>What must be proven</th>
+                  </tr></thead>
+                  <tbody>{LEVERS.map((l) => {
+                    const on = leverIsOn(l, inp);
+                    return (
+                      <tr key={l.id} className="border-b align-top">
+                        <td className="py-1.5 pr-2">{l.on && l.toggleable ? (
+                          <button role="switch" aria-checked={on} aria-label={`Lever ${l.id}`} disabled={!viable} onClick={() => toggleLever(l)}
+                            className={`h-5 w-9 rounded-full p-0.5 transition disabled:opacity-40 ${on ? "bg-emerald-500" : "bg-slate-300"}`}>
+                            <span className={`block h-4 w-4 rounded-full bg-white transition ${on ? "translate-x-4" : ""}`} />
+                          </button>) : <span className="text-slate-400">—</span>}</td>
+                        <td className="pr-2 font-medium text-slate-800"><span className="mr-1 rounded bg-emerald-100 px-1 text-[10px] font-semibold text-emerald-800">{l.id}</span>{l.name}
+                          {l.urls.length > 0 && <div className="mt-0.5 flex flex-wrap gap-1">{l.urls.map((u, i) => <a key={u} href={u} target="_blank" rel="noreferrer" className="text-[10px] text-sky-700 underline">src {i + 1}</a>)}</div>}</td>
+                        <td className="pr-2 text-slate-700">{l.change}</td>
+                        <td className="pr-2 text-right tabular-nums">{l.dNoi2030 === null ? "—" : usd(l.dNoi2030)}</td>
+                        <td className="pr-2 text-right tabular-nums">{l.dDscr2030 === null ? "—" : (l.dDscr2030 >= 0 ? "+" : "") + l.dDscr2030.toFixed(2) + "x"}</td>
+                        <td className="pr-2 text-slate-700">{l.aggressiveness}</td>
+                        <td className="text-slate-700">{l.mustProve}</td>
+                      </tr>);
+                  })}</tbody>
+                </table>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">{LEVER_NOTE}</p>
+            </div>
+          </Card>
 
           <Card title="Estimate sources" className={estimated ? "ring-2 ring-sky-300" : ""}>
             <ul className="mb-3 space-y-1 text-xs text-slate-600">{ESTIMATE_NOTES.map((n) => <li key={n}>{n}</li>)}</ul>

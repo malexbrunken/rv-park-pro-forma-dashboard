@@ -1,4 +1,4 @@
-import { Scenario, SCENARIO_DEFAULTS, WORKBOOK_OUTPUTS_ESTIMATED, WORKBOOK_OUTPUTS_PLACEHOLDER, WorkbookOutputs } from "../src/lib/data";
+import { ESTIMATED_INPUTS, Inputs, LEVERS, VIABLE_INPUTS, WORKBOOK_OUTPUTS_VIABLE, Scenario, SCENARIO_DEFAULTS, WORKBOOK_OUTPUTS_ESTIMATED, WORKBOOK_OUTPUTS_PLACEHOLDER, WorkbookOutputs } from "../src/lib/data";
 import { runModel } from "../src/lib/model";
 
 let fail = 0, total = 0;
@@ -27,10 +27,26 @@ function verify(scenario: Scenario, W: WorkbookOutputs) {
   W.sens2.forEach(([i, j, v]) => chk(`Sensitivity 2 [rate ${r.sens2.rates[i].toFixed(3)}, overrun ${r.sens2.overruns[j]}]`, r.sens2.grid[i][j], v, 1e-6));
   r.cabins.forEach((c, i) => chk(`Cabin schedule ending cash ${c.year}`, c.endingCash, W.cabinEndingCash[i], 0.01));
   chk("Cabins built from cash by 2031", r.cabinsBuiltTotal, W.cabinsBuilt, 0);
+  W.cabinsCumulative?.forEach((v, i) => chk(`Cumulative cabins ${r.cabins[i].year}`, r.cabins[i].cumulativeBuilt, v, 0));
   chk("Inputs still at $0 / 0%", r.placeholderCount, W.placeholderCount, 0);
   console.log(`Cabins built ${r.cabinsBuiltTotal} (${r.cabinNote}) · Loan $${Math.round(r.loan).toLocaleString()}`);
   console.log(`Total project cost $${Math.round(r.totalUses).toLocaleString()} · NOI 2028 $${Math.round(r.years[1].noi).toLocaleString()} · DSCR ${r.years.map((y) => y.dscr.toFixed(2) + "x").join(" / ")}`);
 }
 verify("placeholder", WORKBOOK_OUTPUTS_PLACEHOLDER);
 verify("estimated", WORKBOOK_OUTPUTS_ESTIMATED);
+verify("viable", WORKBOOK_OUTPUTS_VIABLE);
+
+// Lever drop-one snapshot (workbook Levers tab, LibreOffice recalc): switch each lever OFF from the viable scenario.
+console.log("\n=== VIABLE levers: drop-one Δ DSCR 2030 vs. workbook snapshot ===");
+const base = runModel(VIABLE_INPUTS);
+for (const l of LEVERS) {
+  if (!l.on || l.dDscr2030 === null) continue;
+  const off = Object.fromEntries(Object.keys(l.on).map((k) => [k, ESTIMATED_INPUTS[k as keyof Inputs]])) as Partial<Inputs>;
+  const r = runModel({ ...VIABLE_INPUTS, ...off });
+  const d = base.years[3].dscr - r.years[3].dscr;
+  total++;
+  const ok = Math.abs(d - l.dDscr2030) <= 0.005;
+  if (!ok) fail++;
+  console.log(`${ok ? "PASS" : "FAIL"}  Lever ${l.id} ${l.name}: model Δ=${d.toFixed(4)} snapshot Δ=${l.dDscr2030.toFixed(4)}`);
+}
 if (fail) { console.log(`\n${fail}/${total} FAILED`); process.exit(1); } else console.log(`\nALL ${total} CHECKS PASS`);
